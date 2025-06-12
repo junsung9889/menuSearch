@@ -1,0 +1,60 @@
+# 모델 파일들 (용량이 크므로 제외)
+models/
+manual_model/
+local_model/
+paraphrase-multilingual-MiniLM-L12-v2/
+*.bin
+*.safetensors
+*.model
+*.pth
+*.pt
+
+# Python 관련
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# 가상환경
+venv/
+env/
+ENV/
+
+# IDE 설정
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# 임시 파일들
+*.tmp
+*.temp
+model_path.txt
+downloaded_model_path.txt
+simple_model_path.txt
+
+# 로그 파일
+*.log 
