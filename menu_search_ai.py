@@ -11,6 +11,7 @@ from sklearn.metrics.pairwise import cosine_similarity
 import warnings
 import os
 from openai import OpenAI
+import time
 warnings.filterwarnings("ignore")
 
 # SSL 인증서 문제 해결
@@ -73,6 +74,11 @@ class AIMenuSearcher:
                 self.current_model_name = "TF-IDF"
         
         self.data = self.load_data(json_file_path)
+        
+        # 대표 검색어 생성 및 로드
+        self.enhanced_data_path = json_file_path.replace('.json', '_enhanced.json')
+        self.data = self.enhance_data_with_keywords()
+        
         if not self.use_tfidf:
             self.embeddings = self.create_embeddings()
         else:
@@ -80,23 +86,23 @@ class AIMenuSearcher:
     
     def extract_keyword_with_ai(self, query):
         """
-        OpenAI API를 사용해 자연어 입력에서 핵심 키워드 추출
+        OpenAI API를 사용해 자연어 입력을 가장 잘 요약하는 한 단어 생성
         """
         try:
             response = self.client.chat.completions.create(
-                model="gpt-3.5-turbo",
+                model="gpt-4o",
                 messages=[
-                    {"role": "system", "content": "당신은 한국어 자연어 입력에서 핵심 키워드를 추출하는 전문가입니다. 사용자의 질문이나 요청에서 가장 중요한 메뉴나 기능과 관련된 단어 하나만 추출해주세요. 반드시 한 단어로만 답하세요."},
-                    {"role": "user", "content": f"다음 문장에서 핵심 키워드 하나만 추출해주세요: '{query}'"}
+                    {"role": "system", "content": "당신은 한국어 자연어 입력을 가장 잘 요약하는 전문가입니다. 사용자의 질문이나 요청을 전체적으로 가장 잘 표현하는 한 단어를 만들어주세요. 필요하다면 여러 단어를 조합해서 복합어로 만들어도 됩니다. 예: '카드'+'이용내역'='카드이용내역'. 반드시 한 단어로만 답하세요."},
+                    {"role": "user", "content": f"다음 문장을 가장 잘 요약하는 한 단어를 만들어주세요: '{query}'"}
                 ],
                 max_tokens=20,
                 temperature=0.1
             )
             keyword = response.choices[0].message.content.strip()
-            print(f"🔍 AI 키워드 추출: '{query}' → '{keyword}'")
+            print(f"🔍 AI 요약 키워드: '{query}' → '{keyword}'")
             return keyword
         except Exception as e:
-            print(f"❌ AI 키워드 추출 실패: {e}")
+            print(f"❌ AI 요약 키워드 생성 실패: {e}")
             return query  # 실패시 원본 쿼리 반환
     
     def select_best_menu_with_ai(self, original_query, menu_candidates):
@@ -111,7 +117,7 @@ class AIMenuSearcher:
                 menu_text += f"{i}. {item.get('page_name', '')} (카테고리: {item.get('Category', '')}, 서비스: {item.get('Service', '')})\n"
             
             response = self.client.chat.completions.create(
-                model="gpt-3.5-turbo",
+                model="gpt-4o",
                 messages=[
                     {"role": "system", "content": "당신은 사용자의 의도를 파악해 가장 적합한 메뉴를 선택하는 전문가입니다. 사용자의 원래 질문과 메뉴 후보들을 보고, 가장 관련성이 높은 메뉴 하나의 번호만 답하세요. 반드시 숫자만 답하세요."},
                     {"role": "user", "content": f"사용자 질문: '{original_query}'\n\n메뉴 후보들:\n{menu_text}\n\n가장 적합한 메뉴의 번호를 선택하세요:"}
@@ -161,13 +167,25 @@ class AIMenuSearcher:
         self.tfidf_matrix_context = self.tfidf_vectorizer_context.fit_transform(full_context_texts)
     
     def create_text_for_embedding(self, item):
-        """각 항목에 대해 임베딩용 텍스트 생성"""
+        """각 항목에 대해 임베딩용 텍스트 생성 (대표 검색어 가중치 포함)"""
         category = item.get('Category', '')
         service = item.get('Service', '')
         page_name = item.get('page_name', '')
         hierarchy = ' > '.join(item.get('hierarchy', []))
         
-        full_text = f"카테고리: {category} 서비스: {service} 페이지명: {page_name} 계층구조: {hierarchy}"
+        # 기본 텍스트
+        basic_text = f"카테고리: {category} 서비스: {service} 페이지명: {page_name} 계층구조: {hierarchy}"
+        
+        # 대표 검색어가 있으면 가중치로 추가 (3번 반복으로 가중치 부여)
+        representative_keywords = item.get('representative_keywords', [])
+        if representative_keywords:
+            keywords_text = ' '.join(representative_keywords)
+            # 대표 검색어를 3번 반복하여 가중치 부여
+            weighted_keywords = f" {keywords_text} {keywords_text} {keywords_text}"
+            full_text = basic_text + weighted_keywords
+        else:
+            full_text = basic_text
+        
         return full_text.strip()
     
     def create_embeddings(self):
@@ -252,7 +270,7 @@ class AIMenuSearcher:
         print(f"{'='*60}")
         
         # 1단계: AI로 키워드 추출
-        print(f"\n📝 1단계: 키워드 추출")
+        print(f"\n📝 1단계: 요약 키워드 생성")
         keyword = self.extract_keyword_with_ai(query)
         
         # 2단계: 벡터 검색으로 상위 5개 후보 추출
@@ -293,7 +311,108 @@ class AIMenuSearcher:
         if item.get('hierarchy'):
             print(f"📋 계층구조: {' > '.join(item.get('hierarchy', []))}")
         print(f"📊 종합 점수: {result['combined_score']:.4f}")
+        
+        # 대표 검색어 정보 출력
+        representative_keywords = item.get('representative_keywords', [])
+        if representative_keywords:
+            print(f"🔍 AI 생성 대표 검색어: {', '.join(representative_keywords)}")
+        
         print(f"{'='*60}")
+    
+    def generate_representative_keywords(self, item):
+        """
+        특정 메뉴 항목에 대해 OpenAI로부터 대표 검색어 5개 생성
+        """
+        try:
+            category = item.get('Category', '')
+            service = item.get('Service', '')
+            page_name = item.get('page_name', '')
+            hierarchy = ' > '.join(item.get('hierarchy', []))
+            
+            menu_info = f"카테고리: {category}, 서비스: {service}, 페이지명: {page_name}, 계층구조: {hierarchy}"
+            
+            response = self.client.chat.completions.create(
+                model="gpt-4o",
+                messages=[
+                    {"role": "system", "content": "당신은 메뉴 검색 최적화 전문가입니다. 주어진 메뉴 정보를 보고, 사용자가 이 메뉴를 찾기 위해 검색할 가능성이 높은 검색어 5개를 생성해주세요. 각 검색어는 한국어로 작성하고, 쉼표로 구분해주세요. 실제 사용자들이 자연스럽게 사용할 법한 검색어를 만들어주세요."},
+                    {"role": "user", "content": f"다음 메뉴에 대한 대표 검색어 5개를 생성해주세요:\n{menu_info}"}
+                ],
+                max_tokens=100,
+                temperature=0.3
+            )
+            
+            keywords_text = response.choices[0].message.content.strip()
+            keywords = [kw.strip() for kw in keywords_text.split(',')]
+            
+            # 정확히 5개가 아니면 조정
+            if len(keywords) > 5:
+                keywords = keywords[:5]
+            elif len(keywords) < 5:
+                # 부족하면 기본 키워드들로 채움
+                basic_keywords = [category, service, page_name]
+                for bk in basic_keywords:
+                    if bk and bk not in keywords and len(keywords) < 5:
+                        keywords.append(bk)
+            
+            return keywords[:5]
+            
+        except Exception as e:
+            print(f"❌ 대표 검색어 생성 실패 ({item.get('page_name', 'Unknown')}): {e}")
+            # 실패시 기본 키워드 반환
+            return [
+                item.get('page_name', ''),
+                item.get('Category', ''),
+                item.get('Service', ''),
+                ' '.join(item.get('hierarchy', [])),
+                f"{item.get('Category', '')} {item.get('Service', '')}"
+            ]
+    
+    def enhance_data_with_keywords(self):
+        """
+        메뉴 데이터에 대표 검색어를 추가하여 강화된 데이터 생성
+        """
+        # 이미 강화된 데이터가 있는지 확인
+        if os.path.exists(self.enhanced_data_path):
+            try:
+                with open(self.enhanced_data_path, 'r', encoding='utf-8') as f:
+                    enhanced_data = json.load(f)
+                print(f"✅ 기존 강화된 데이터를 로드했습니다: {len(enhanced_data)}개 항목")
+                return enhanced_data
+            except Exception as e:
+                print(f"⚠️ 기존 강화된 데이터 로드 실패: {e}")
+        
+        print(f"🤖 AI를 활용해 각 메뉴별 대표 검색어를 생성하고 있습니다...")
+        print(f"📊 총 {len(self.data)}개 항목 처리 예정 (시간이 소요됩니다)")
+        
+        enhanced_data = []
+        
+        for i, item in enumerate(self.data, 1):
+            print(f"🔄 진행중 [{i}/{len(self.data)}]: {item.get('page_name', 'Unknown')}")
+            
+            # 대표 검색어 생성
+            representative_keywords = self.generate_representative_keywords(item)
+            
+            # 기존 데이터에 검색어 추가
+            enhanced_item = item.copy()
+            enhanced_item['representative_keywords'] = representative_keywords
+            enhanced_data.append(enhanced_item)
+            
+            # API 호출 제한을 위한 딜레이
+            if i % 10 == 0:
+                print(f"⏱️ API 호출 제한 방지를 위해 잠시 대기중...")
+                time.sleep(2)
+            else:
+                time.sleep(0.5)
+        
+        # 강화된 데이터 저장
+        try:
+            with open(self.enhanced_data_path, 'w', encoding='utf-8') as f:
+                json.dump(enhanced_data, f, ensure_ascii=False, indent=2)
+            print(f"✅ 강화된 데이터를 저장했습니다: {self.enhanced_data_path}")
+        except Exception as e:
+            print(f"❌ 강화된 데이터 저장 실패: {e}")
+        
+        return enhanced_data
 
 
 def main():
