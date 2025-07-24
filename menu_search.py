@@ -98,6 +98,17 @@ class UnifiedMenuSearcher:
         self.filtered_data = self._load_or_create_filtered_data()
         self.enhanced_data = self._load_or_create_enhanced_data()
         
+        # PRIMARY, SECONDARY 페이지만 유지 (ERROR, INFO 제외)
+        original_enhanced_count = len(self.enhanced_data)
+        self.enhanced_data = [item for item in self.enhanced_data if item.get('page_classification') in ['PRIMARY', 'SECONDARY']]
+        final_count = len(self.enhanced_data)
+        excluded_count = original_enhanced_count - final_count
+        print(f"✅ PRIMARY/SECONDARY 페이지만 유지: {final_count}개 항목 ({excluded_count}개 ERROR/INFO 제외)")
+        
+        # 2차 필터링 통계 저장
+        self.excluded_ai_count = excluded_count
+        self.original_enhanced_count = original_enhanced_count
+        
         # 모델 로드
         self._load_model()
         
@@ -311,16 +322,56 @@ class UnifiedMenuSearcher:
             return f"이 페이지는 {item.get('page_name', '')} 관련 기능을 제공하는 화면입니다."
     
     def _classify_page_importance(self, item):
-        """페이지 중요도 분류"""
-        page_name = item.get('page_name', '')
-        
-        # 핵심 기능 키워드
-        primary_keywords = ['홈', '카드', '결제', '관리', '설정', '조회', '내역', '명세서', '포인트']
-        
-        if any(keyword in page_name for keyword in primary_keywords):
-            return 'PRIMARY'
-        else:
-            return 'SECONDARY'
+        """AI를 활용한 페이지 중요도 4단계 분류"""
+        try:
+            category = item.get('Category', '')
+            service = item.get('Service', '')
+            page_name = item.get('page_name', '')
+            hierarchy = ' > '.join(item.get('hierarchy', []))
+            
+            menu_info = f"카테고리: {category}, 서비스: {service}, 페이지명: {page_name}, 계층구조: {hierarchy}"
+            
+            response = self.client.chat.completions.create(
+                model="gpt-4o",
+                messages=[
+                    {"role": "system", "content": """당신은 앱 페이지 분류 전문가입니다. 다음 4가지 기준으로 페이지를 분류해주세요:
+
+1. PRIMARY: 사용자가 핵심 업무를 수행하는 메인 기능 페이지
+   - 예: 홈, 카드관리, 결제, 조회, 명세서, 설정 등 주요 기능
+
+2. SECONDARY: 부가적이지만 의미있는 기능 페이지  
+   - 예: 상세정보, 도움말, 안내, 약관 등 보조 기능
+
+3. ERROR: 오류, 실패, 문제 상황 처리 페이지
+   - 예: 오류화면, 실패안내, 타임아웃, 없는페이지 등
+
+4. INFO: 단순 안내, 중간 과정, 시스템 페이지
+   - 예: 스플래시, 브릿지, 로딩, 권한동의 등 시스템 화면
+
+반드시 PRIMARY, SECONDARY, ERROR, INFO 중 하나만 답하세요."""},
+                    {"role": "user", "content": f"다음 페이지를 분류해주세요:\n{menu_info}"}
+                ],
+                max_tokens=20,
+                temperature=0.1
+            )
+            
+            classification = response.choices[0].message.content.strip().upper()
+            
+            # 유효한 분류인지 확인
+            if classification not in ['PRIMARY', 'SECONDARY', 'ERROR', 'INFO']:
+                classification = 'SECONDARY'  # 기본값
+            
+            return classification
+            
+        except Exception as e:
+            print(f"❌ AI 페이지 분류 실패 ({item.get('page_name', 'Unknown')}): {e}")
+            # 실패시 기본 규칙 적용
+            page_name = item.get('page_name', '')
+            primary_keywords = ['홈', '카드', '결제', '관리', '설정', '조회', '내역', '명세서', '포인트']
+            if any(keyword in page_name for keyword in primary_keywords):
+                return 'PRIMARY'
+            else:
+                return 'SECONDARY'
     
     def _load_model(self):
         """모델 로드"""
@@ -459,14 +510,20 @@ class UnifiedMenuSearcher:
                 normalized_vector = vector_sim / max_vector_score
                 normalized_keyword = keyword_score / max_keyword_score
                 
-                hybrid_score = (normalized_vector * vector_weight) + (normalized_keyword * keyword_weight)
+                # PRIMARY 페이지에 가중치 부여
+                item = self.enhanced_data[i]
+                page_classification = item.get('page_classification', 'SECONDARY')
+                classification_boost = 1.2 if page_classification == 'PRIMARY' else 1.0
+                
+                hybrid_score = ((normalized_vector * vector_weight) + (normalized_keyword * keyword_weight)) * classification_boost
                 
                 results.append({
                     'index': i,
                     'data': self.enhanced_data[i],
                     'vector_score': float(vector_sim),
                     'keyword_score': float(keyword_score),
-                    'hybrid_score': float(hybrid_score)
+                    'hybrid_score': float(hybrid_score),
+                    'classification_boost': classification_boost
                 })
         
         results.sort(key=lambda x: x['hybrid_score'], reverse=True)
@@ -516,34 +573,118 @@ class UnifiedMenuSearcher:
             print(f"❌ AI 메뉴 선택 실패: {e}")
             return candidates[0]
     
+    def _optimize_query_with_ai(self, query):
+        """AI를 활용한 검색어 최적화 (단일어 -> 복합어 변환)"""
+        try:
+            response = self.client.chat.completions.create(
+                model="gpt-4o",
+                messages=[
+                    {"role": "system", "content": """당신은 한국어 검색어 최적화 전문가입니다. 
+사용자가 입력한 자연어 검색어에서 의미있는 단일어들을 찾아 복합어로 변환해주세요.
+
+예시:
+- '카드 이용 내역 알려줘' → '카드이용내역 알려줘'
+- '페이북 머니 충전하고 싶어' → '페이북머니 충전하고 싶어'  
+- '신용 카드 신청' → '신용카드 신청'
+- '포인트 적립 내역' → '포인트적립내역'
+- '대출 이자 계산기' → '대출이자계산기'
+
+규칙:
+1. 띄어쓰기로 분리된 단일어들 중 하나의 개념을 나타내는 것들을 합쳐주세요
+2. 조사, 어미, 부사는 그대로 유지하세요
+3. 원래 의미를 해치지 않는 선에서만 변환하세요
+4. 변환된 검색어만 답하세요 (설명 없이)"""},
+                    {"role": "user", "content": f"다음 검색어를 최적화해주세요: {query}"}
+                ],
+                max_tokens=100,
+                temperature=0.1
+            )
+            
+            optimized_query = response.choices[0].message.content.strip()
+            
+            # 변환이 있었는지 확인
+            if optimized_query != query and optimized_query:
+                print(f"🔧 검색어 최적화: '{query}' → '{optimized_query}'")
+                return optimized_query
+            else:
+                return query
+                
+        except Exception as e:
+            print(f"⚠️ 검색어 최적화 실패: {e}")
+            return query
+
+    def _merge_search_results(self, original_results, optimized_results, max_results=7):
+        """원본과 최적화된 검색 결과를 병합"""
+        # 중복 제거를 위한 딕셔너리 (page_name 기준)
+        merged = {}
+        
+        # 원본 검색 결과를 우선 추가 (더 높은 가중치)
+        for result in original_results:
+            page_name = result['data'].get('page_name', '')
+            if page_name not in merged:
+                # 원본 검색에서 나온 결과는 점수에 1.1배 가중치
+                boosted_result = result.copy()
+                boosted_result['hybrid_score'] *= 1.1
+                boosted_result['source'] = 'original'
+                merged[page_name] = boosted_result
+        
+        # 최적화된 검색 결과 추가 (중복되지 않는 것만)
+        for result in optimized_results:
+            page_name = result['data'].get('page_name', '')
+            if page_name not in merged:
+                result_copy = result.copy()
+                result_copy['source'] = 'optimized'
+                merged[page_name] = result_copy
+        
+        # 점수 순으로 정렬하여 상위 max_results개 반환
+        final_results = sorted(merged.values(), key=lambda x: x['hybrid_score'], reverse=True)
+        return final_results[:max_results]
+
     def search(self, query):
-        """통합 검색 수행"""
+        """이중 검색: 원본 + 최적화된 검색어 병합"""
         print(f"\n{'='*60}")
         print(f"🚀 통합 AI 검색 시작: '{query}'")
         print(f"{'='*60}")
         
-        # 1단계: 하이브리드 검색
-        print(f"\n🔍 1단계: 하이브리드 검색 (벡터 + 키워드)")
-        candidates = self.hybrid_search(query, top_k=7)
+        # 0단계: 검색어 최적화
+        optimized_query = self._optimize_query_with_ai(query)
         
-        if not candidates:
+        # 1단계: 이중 하이브리드 검색
+        print(f"\n🔍 1단계: 이중 하이브리드 검색 (원본 + 최적화)")
+        
+        # 원본 검색어로 검색
+        print(f"   📝 원본 검색어: '{query}'")
+        original_candidates = self.hybrid_search(query, top_k=5)
+        
+        # 최적화된 검색어로 검색 (다를 경우에만)
+        optimized_candidates = []
+        if optimized_query != query:
+            print(f"   🔧 최적화 검색어: '{optimized_query}'")
+            optimized_candidates = self.hybrid_search(optimized_query, top_k=5)
+        
+        # 결과 병합
+        all_candidates = self._merge_search_results(original_candidates, optimized_candidates, max_results=7)
+        
+        if not all_candidates:
             print("❌ 검색 결과가 없습니다.")
             return None
         
-        print(f"   찾은 후보 {len(candidates)}개:")
-        for i, result in enumerate(candidates, 1):
+        print(f"   찾은 후보 {len(all_candidates)}개:")
+        for i, result in enumerate(all_candidates, 1):
             item = result['data']
             page_name = item.get('page_name', '')
             vector_score = result['vector_score']
             keyword_score = result['keyword_score']
             hybrid_score = result['hybrid_score']
+            source = result.get('source', 'merged')
+            source_icon = '📝' if source == 'original' else '🔧' if source == 'optimized' else '🔀'
             
-            print(f"   {i}. {page_name}")
+            print(f"   {i}. {page_name} {source_icon}")
             print(f"      벡터: {vector_score:.3f} | 키워드: {keyword_score:.3f} | 통합: {hybrid_score:.3f}")
         
-        # 2단계: AI 최종 선택
+        # 2단계: AI 최종 선택 (원래 질의 사용)
         print(f"\n🎯 2단계: AI 최종 선택")
-        final_result = self.ai_final_selection(query, candidates)
+        final_result = self.ai_final_selection(query, all_candidates)
         
         return final_result
     
@@ -566,7 +707,10 @@ class UnifiedMenuSearcher:
         
         print(f"📊 하이브리드 점수: {result.get('hybrid_score', 0):.4f}")
         print(f"   ┣ 벡터 점수: {result.get('vector_score', 0):.4f}")
-        print(f"   ┗ 키워드 점수: {result.get('keyword_score', 0):.4f}")
+        print(f"   ┣ 키워드 점수: {result.get('keyword_score', 0):.4f}")
+        classification_boost = result.get('classification_boost', 1.0)
+        if classification_boost > 1.0:
+            print(f"   ┗ PRIMARY 가중치: x{classification_boost}")
         
         ai_description = item.get('ai_description', '')
         if ai_description:
@@ -592,13 +736,15 @@ class UnifiedMenuSearcher:
         print(f"🚀 강화된 데이터: {len(self.enhanced_data)}개 항목")
         print(f"🧠 사용 모델: {self.current_model_name}")
         
-        # 분류 통계
+        # 분류 통계  
         primary_count = sum(1 for item in self.enhanced_data if item.get('page_classification') == 'PRIMARY')
-        secondary_count = len(self.enhanced_data) - primary_count
+        secondary_count = sum(1 for item in self.enhanced_data if item.get('page_classification') == 'SECONDARY')
         
-        print(f"🎯 PRIMARY 페이지: {primary_count}개")
+        print(f"🎯 PRIMARY 페이지: {primary_count}개 (검색 가중치 x1.2)")
         print(f"📋 SECONDARY 페이지: {secondary_count}개")
-        print(f"📈 필터링 효율성: {((len(self.original_data) - len(self.filtered_data)) / len(self.original_data) * 100):.1f}% 제거")
+        print(f"📈 1차 필터링: {((len(self.original_data) - len(self.filtered_data)) / len(self.original_data) * 100):.1f}% 제거 (규칙 기반)")
+        ai_filter_percent = (self.excluded_ai_count / self.original_enhanced_count * 100) if self.original_enhanced_count > 0 else 0
+        print(f"📈 2차 필터링: {ai_filter_percent:.1f}% 제거 (AI 4단계 분류 후 ERROR/INFO 제외)")
         print(f"{'='*60}")
 
 
