@@ -1,29 +1,27 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-AI 메뉴 검색 시스템
-- 자동 페이지 분류 + 데이터 강화 + 하이브리드 검색
-- 스마트 캐싱으로 중복 작업 방지  
-- OpenAI API와 최신 AI 기술을 결합한 차세대 검색 플랫폼
+순수 AI 검색 엔진 v3.0 - LLM 의존성 제거
+- Bi-encoder (multilingual-e5-small) + BM25 하이브리드 검색
+- Cross-encoder (ms-marco-MiniLM-L-12-v2) Rerank
+- 2단계 앙상블 검색 시스템
 """
 
 import json
 import numpy as np
-from sentence_transformers import SentenceTransformer
+from sentence_transformers import SentenceTransformer, CrossEncoder
 from sklearn.metrics.pairwise import cosine_similarity
-from sklearn.feature_extraction.text import TfidfVectorizer
 import warnings
 import os
-from openai import OpenAI
 import time
 import re
 from collections import Counter
 import math
+import ssl
 
 warnings.filterwarnings("ignore")
 
 # SSL 인증서 문제 해결
-import ssl
 ssl._create_default_https_context = ssl._create_unverified_context
 
 
@@ -83,610 +81,217 @@ class BM25:
         return scores
 
 
-class UnifiedMenuSearcher:
-    def __init__(self, openai_api_key=None):
-        """통합 메뉴 검색기 초기화"""
-        self.client = OpenAI(api_key=openai_api_key or os.getenv("OPENAI_API_KEY"))
+class PureSearchEngine:
+    """순수 검색 엔진 - LLM 의존성 없음"""
+    
+    def __init__(self):
+        """검색 엔진 초기화"""
+        print("🚀 순수 AI 검색 엔진 v3.0 초기화")
+        print("="*50)
         
-        # 파일 경로 정의
-        self.original_data_file = 'ia-data.json'
-        self.filtered_data_file = 'ia-data_filtered.json'
-        self.enhanced_data_file = 'ia-data_enhanced.json'
+        # 데이터 로드
+        self.data = self._load_data()
         
-        # 단계별 데이터 로드
-        self.original_data = self._load_original_data()
-        self.filtered_data = self._load_or_create_filtered_data()
-        self.enhanced_data = self._load_or_create_enhanced_data()
-        
-        # PRIMARY, SECONDARY 페이지만 유지 (ERROR, INFO 제외)
-        original_enhanced_count = len(self.enhanced_data)
-        self.enhanced_data = [item for item in self.enhanced_data if item.get('page_classification') in ['PRIMARY', 'SECONDARY']]
-        final_count = len(self.enhanced_data)
-        excluded_count = original_enhanced_count - final_count
-        print(f"✅ PRIMARY/SECONDARY 페이지만 유지: {final_count}개 항목 ({excluded_count}개 ERROR/INFO 제외)")
-        
-        # 2차 필터링 통계 저장
-        self.excluded_ai_count = excluded_count
-        self.original_enhanced_count = original_enhanced_count
-        
-        # 모델 로드
-        self._load_model()
+        # 필수 모델 로드 (실패시 종료)
+        self._load_required_models()
         
         # 검색 인덱스 생성
-        if not self.use_tfidf:
-            self.embeddings = self._create_embeddings()
-        else:
-            self._setup_tfidf()
+        self._create_search_indices()
         
-        self._setup_bm25()
+        print("✅ 검색 엔진 초기화 완료!")
     
-    def _load_original_data(self):
-        """원본 데이터 로드"""
+    def _load_data(self):
+        """데이터 로드"""
         try:
-            with open(self.original_data_file, 'r', encoding='utf-8') as f:
+            with open('ia-data_enhanced.json', 'r', encoding='utf-8') as f:
                 data = json.load(f)
-            print(f"✅ 원본 데이터 로드: {len(data)}개 항목")
-            return data
+            
+            # PRIMARY, SECONDARY 페이지만 유지
+            filtered_data = [item for item in data if item.get('page_classification') in ['PRIMARY', 'SECONDARY']]
+            
+            print(f"📊 데이터 로드: {len(filtered_data)}개 항목")
+            return filtered_data
+            
         except Exception as e:
-            print(f"❌ 원본 데이터 로드 실패: {e}")
-            return []
+            print(f"❌ 데이터 로드 실패: {e}")
+            exit(1)
     
-    def _load_or_create_filtered_data(self):
-        """필터링된 데이터 로드 또는 생성"""
-        if os.path.exists(self.filtered_data_file):
-            try:
-                with open(self.filtered_data_file, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                print(f"✅ 기존 필터링된 데이터 로드: {len(data)}개 항목")
-                return data
-            except Exception as e:
-                print(f"⚠️ 필터링된 데이터 로드 실패: {e}")
+    def _load_required_models(self):
+        """필수 모델 로드 - 실패시 프로그램 종료"""
         
-        print("🔍 필터링된 데이터를 생성합니다...")
-        return self._create_filtered_data()
-    
-    def _load_or_create_enhanced_data(self):
-        """강화된 데이터 로드 또는 생성"""
-        if os.path.exists(self.enhanced_data_file):
-            try:
-                with open(self.enhanced_data_file, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                print(f"✅ 기존 강화된 데이터 로드: {len(data)}개 항목")
-                return data
-            except Exception as e:
-                print(f"⚠️ 강화된 데이터 로드 실패: {e}")
+        # 1. Bi-encoder 모델 로드
+        bi_encoder_path = "./models/multilingual-e5-small"
+        if not os.path.exists(bi_encoder_path):
+            print(f"❌ Bi-encoder 모델을 찾을 수 없습니다: {bi_encoder_path}")
+            exit(1)
         
-        print("🚀 강화된 데이터를 생성합니다...")
-        return self._create_enhanced_data()
-    
-    def _create_filtered_data(self):
-        """페이지 분류를 통한 필터링된 데이터 생성"""
-        print("🔧 규칙 기반 페이지 분류 시작...")
-        
-        # 규칙 기반 필터링 패턴
-        exclude_keywords = [
-            "오류", "실패", "없음", "empty", "안내", "동의", "브릿지", "점검중",
-            "세션", "타임아웃", "미연결", "업데이트", "스플래시", "랜딩", "복호화",
-            "탐지", "장애", "종료", "재실행", "권한", "스켈레톤"
-        ]
-        
-        error_patterns = [
-            r".*오류.*", r".*실패.*", r".*없음.*", r".*empty.*", r".*error.*",
-            r".*fail.*", r".*timeout.*", r".*세션.*", r".*점검.*"
-        ]
-        
-        bridge_patterns = [
-            r".*브릿지.*", r".*bridge.*", r".*랜딩.*", r".*landing.*",
-            r".*스플래시.*", r".*splash.*"
-        ]
-        
-        filtered_data = []
-        
-        for item in self.original_data:
-            page_name = item.get('page_name', '').strip()
-            category = item.get('Category', '')
-            service = item.get('Service', '')
-            hierarchy = item.get('hierarchy', [])
-            
-            # 공백 페이지 제외
-            if not page_name or page_name.isspace():
-                continue
-            
-            # 오류 페이지 제외
-            is_error = any(re.match(pattern, page_name, re.IGNORECASE) for pattern in error_patterns)
-            if is_error:
-                continue
-            
-            # 브릿지 페이지 제외
-            is_bridge = any(re.match(pattern, page_name, re.IGNORECASE) for pattern in bridge_patterns)
-            if is_bridge:
-                continue
-            
-            # 키워드 기반 제외
-            is_excluded = any(keyword in page_name.lower() or keyword in service.lower() for keyword in exclude_keywords)
-            if is_excluded:
-                continue
-            
-            # 계층 깊이 체크 (너무 깊은 것은 제외)
-            if len(hierarchy) > 5:
-                continue
-            
-            # 유의미한 페이지로 판단되면 추가
-            enhanced_item = item.copy()
-            enhanced_item['is_meaningful'] = True
-            enhanced_item['filter_reason'] = 'rules_based'
-            filtered_data.append(enhanced_item)
-        
-        # 저장
         try:
-            with open(self.filtered_data_file, 'w', encoding='utf-8') as f:
-                json.dump(filtered_data, f, ensure_ascii=False, indent=2)
-            print(f"✅ 필터링된 데이터 저장: {self.filtered_data_file} ({len(filtered_data)}개 항목)")
+            print("🔄 Bi-encoder 모델 로드 중...")
+            self.bi_encoder = SentenceTransformer(bi_encoder_path)
+            print("✅ multilingual-e5-small 로드 완료")
         except Exception as e:
-            print(f"❌ 필터링된 데이터 저장 실패: {e}")
+            print(f"❌ Bi-encoder 로드 실패: {e}")
+            exit(1)
         
-        return filtered_data
-    
-    def _create_enhanced_data(self):
-        """AI를 활용한 강화된 데이터 생성"""
-        print("🤖 AI를 활용해 데이터를 강화합니다...")
-        print(f"📊 총 {len(self.filtered_data)}개 항목 처리 예정")
+        # 2. Cross-encoder 모델 로드
+        cross_encoder_path = "./models/ms-marco-MiniLM-L-12-v2"
+        if not os.path.exists(cross_encoder_path):
+            print(f"❌ Cross-encoder 모델을 찾을 수 없습니다: {cross_encoder_path}")
+            exit(1)
         
-        enhanced_data = []
-        
-        for i, item in enumerate(self.filtered_data, 1):
-            print(f"🔄 진행중 [{i}/{len(self.filtered_data)}]: {item.get('page_name', 'Unknown')}")
-            
-            enhanced_item = item.copy()
-            
-            # 대표 검색어 생성
-            enhanced_item['representative_keywords'] = self._generate_representative_keywords(item)
-            
-            # AI 설명 생성
-            enhanced_item['ai_description'] = self._generate_ai_description(item)
-            
-            # 페이지 분류
-            enhanced_item['page_classification'] = self._classify_page_importance(item)
-            
-            enhanced_data.append(enhanced_item)
-            
-            # API 호출 제한을 위한 딜레이
-            if i % 10 == 0:
-                print(f"⏱️ API 호출 제한 방지를 위해 잠시 대기중...")
-                time.sleep(2)
-            else:
-                time.sleep(0.5)
-        
-        # 저장
         try:
-            with open(self.enhanced_data_file, 'w', encoding='utf-8') as f:
-                json.dump(enhanced_data, f, ensure_ascii=False, indent=2)
-            print(f"✅ 강화된 데이터 저장: {self.enhanced_data_file}")
+            print("🔄 Cross-encoder 모델 로드 중...")
+            self.cross_encoder = CrossEncoder(cross_encoder_path)
+            print("✅ ms-marco-MiniLM-L-12-v2 로드 완료")
         except Exception as e:
-            print(f"❌ 강화된 데이터 저장 실패: {e}")
-        
-        return enhanced_data
+            print(f"❌ Cross-encoder 로드 실패: {e}")
+            exit(1)
     
-    def _generate_representative_keywords(self, item):
-        """대표 검색어 생성"""
-        try:
-            category = item.get('Category', '')
-            service = item.get('Service', '')
-            page_name = item.get('page_name', '')
-            hierarchy = ' > '.join(item.get('hierarchy', []))
-            
-            menu_info = f"카테고리: {category}, 서비스: {service}, 페이지명: {page_name}, 계층구조: {hierarchy}"
-            
-            response = self.client.chat.completions.create(
-                model="gpt-4o",
-                messages=[
-                    {"role": "system", "content": "당신은 메뉴 검색 최적화 전문가입니다. 주어진 메뉴 정보를 보고, 사용자가 이 메뉴를 찾기 위해 검색할 가능성이 높은 검색어 5개를 생성해주세요. 각 검색어는 한국어로 작성하고, 쉼표로 구분해주세요."},
-                    {"role": "user", "content": f"다음 메뉴에 대한 대표 검색어 5개를 생성해주세요:\n{menu_info}"}
-                ],
-                max_tokens=100,
-                temperature=0.3
-            )
-            
-            keywords_text = response.choices[0].message.content.strip()
-            keywords = [kw.strip() for kw in keywords_text.split(',')]
-            return keywords[:5]
-            
-        except Exception as e:
-            print(f"❌ 대표 검색어 생성 실패: {e}")
-            return [page_name, category, service]
-    
-    def _generate_ai_description(self, item):
-        """AI 설명 생성"""
-        try:
-            category = item.get('Category', '')
-            service = item.get('Service', '')
-            page_name = item.get('page_name', '')
-            hierarchy = ' > '.join(item.get('hierarchy', []))
-            
-            menu_info = f"카테고리: {category}, 서비스: {service}, 페이지명: {page_name}, 계층구조: {hierarchy}"
-            
-            response = self.client.chat.completions.create(
-                model="gpt-4o",
-                messages=[
-                    {"role": "system", "content": "당신은 메뉴 설명 전문가입니다. 주어진 메뉴 정보를 보고, 사용자가 이해하기 쉬운 한 문장의 설명을 만들어주세요. '이 페이지는 ~를 할 수 있는 화면입니다' 형태로 작성해주세요."},
-                    {"role": "user", "content": f"다음 메뉴에 대한 설명을 생성해주세요:\n{menu_info}"}
-                ],
-                max_tokens=100,
-                temperature=0.3
-            )
-            
-            return response.choices[0].message.content.strip()
-            
-        except Exception as e:
-            print(f"❌ AI 설명 생성 실패: {e}")
-            return f"이 페이지는 {item.get('page_name', '')} 관련 기능을 제공하는 화면입니다."
-    
-    def _classify_page_importance(self, item):
-        """AI를 활용한 페이지 중요도 4단계 분류"""
-        try:
-            category = item.get('Category', '')
-            service = item.get('Service', '')
-            page_name = item.get('page_name', '')
-            hierarchy = ' > '.join(item.get('hierarchy', []))
-            
-            menu_info = f"카테고리: {category}, 서비스: {service}, 페이지명: {page_name}, 계층구조: {hierarchy}"
-            
-            response = self.client.chat.completions.create(
-                model="gpt-4o",
-                messages=[
-                    {"role": "system", "content": """당신은 앱 페이지 분류 전문가입니다. 다음 4가지 기준으로 페이지를 분류해주세요:
-
-1. PRIMARY: 사용자가 핵심 업무를 수행하는 메인 기능 페이지
-   - 예: 홈, 카드관리, 결제, 조회, 명세서, 설정 등 주요 기능
-
-2. SECONDARY: 부가적이지만 의미있는 기능 페이지  
-   - 예: 상세정보, 도움말, 안내, 약관 등 보조 기능
-
-3. ERROR: 오류, 실패, 문제 상황 처리 페이지
-   - 예: 오류화면, 실패안내, 타임아웃, 없는페이지 등
-
-4. INFO: 단순 안내, 중간 과정, 시스템 페이지
-   - 예: 스플래시, 브릿지, 로딩, 권한동의 등 시스템 화면
-
-반드시 PRIMARY, SECONDARY, ERROR, INFO 중 하나만 답하세요."""},
-                    {"role": "user", "content": f"다음 페이지를 분류해주세요:\n{menu_info}"}
-                ],
-                max_tokens=20,
-                temperature=0.1
-            )
-            
-            classification = response.choices[0].message.content.strip().upper()
-            
-            # 유효한 분류인지 확인
-            if classification not in ['PRIMARY', 'SECONDARY', 'ERROR', 'INFO']:
-                classification = 'SECONDARY'  # 기본값
-            
-            return classification
-            
-        except Exception as e:
-            print(f"❌ AI 페이지 분류 실패 ({item.get('page_name', 'Unknown')}): {e}")
-            # 실패시 기본 규칙 적용
-            page_name = item.get('page_name', '')
-            primary_keywords = ['홈', '카드', '결제', '관리', '설정', '조회', '내역', '명세서', '포인트']
-            if any(keyword in page_name for keyword in primary_keywords):
-                return 'PRIMARY'
-            else:
-                return 'SECONDARY'
-    
-    def _load_model(self):
-        """모델 로드"""
-        local_model_paths = [
-            "./models/multilingual-e5-small",
-            "./models/ko-sroberta-multitask",
-            "./models/distiluse-base-multilingual-cased-v2",
-            "./models/all-mpnet-base-v2",
-        ]
+    def _create_search_indices(self):
+        """검색 인덱스 생성"""
+        print("🔍 검색 인덱스 생성 중...")
         
-        model_loaded = False
-        self.current_model_name = "Unknown"
-        
-        for model_path in local_model_paths:
-            if os.path.exists(model_path) and os.path.exists(f"{model_path}/pytorch_model.bin"):
-                try:
-                    model_name = os.path.basename(model_path)
-                    print(f"🔄 {model_name} 모델을 로드하고 있습니다...")
-                    self.model = SentenceTransformer(model_path)
-                    print(f"✅ {model_name} 모델 로드 완료!")
-                    
-                    self.use_tfidf = False
-                    self.current_model_name = model_name
-                    model_loaded = True
-                    break
-                except Exception as e:
-                    print(f"❌ {model_path} 로드 실패: {e}")
-                    continue
-        
-        if not model_loaded:
-            try:
-                print("온라인 모델을 로드하고 있습니다...")
-                self.model = SentenceTransformer('all-MiniLM-L6-v2')
-                print("모델 로드 완료")
-                self.use_tfidf = False
-                self.current_model_name = "all-MiniLM-L6-v2"
-            except Exception as e:
-                print(f"온라인 모델 로드 중 오류 발생: {e}")
-                print("대체 방법으로 TF-IDF를 사용합니다.")
-                self.use_tfidf = True
-                self.current_model_name = "TF-IDF"
-    
-    def _create_enhanced_text_for_embedding(self, item):
-        """강화된 임베딩용 텍스트 생성"""
-        category = item.get('Category', '')
-        service = item.get('Service', '')
-        page_name = item.get('page_name', '')
-        hierarchy = ' > '.join(item.get('hierarchy', []))
-        
-        basic_text = f"카테고리: {category} 서비스: {service} 페이지명: {page_name} 계층구조: {hierarchy}"
-        
-        # 대표 검색어 가중치
-        representative_keywords = item.get('representative_keywords', [])
-        if representative_keywords:
-            keywords_text = ' '.join(representative_keywords)
-            weighted_keywords = f" {keywords_text} {keywords_text} {keywords_text}"
-        else:
-            weighted_keywords = ""
-        
-        # AI 설명 가중치
-        ai_description = item.get('ai_description', '')
-        if ai_description:
-            weighted_description = f" {ai_description} {ai_description}"
-        else:
-            weighted_description = ""
-        
-        return basic_text + weighted_keywords + weighted_description
-    
-    def _create_embeddings(self):
-        """강화된 벡터 임베딩 생성"""
-        print("🔮 강화된 벡터 임베딩을 생성하고 있습니다...")
-        
-        enhanced_texts = [self._create_enhanced_text_for_embedding(item) for item in self.enhanced_data]
-        page_texts = [item.get('page_name', '') for item in self.enhanced_data]
-        ai_descriptions = [item.get('ai_description', '') for item in self.enhanced_data]
-        
-        embeddings = {
-            'enhanced': self.model.encode(enhanced_texts, show_progress_bar=True),
-            'page': self.model.encode(page_texts, show_progress_bar=True),
-            'description': self.model.encode(ai_descriptions, show_progress_bar=True)
-        }
-        
-        print("✅ 강화된 벡터 임베딩 생성 완료")
-        return embeddings
-    
-    def _setup_tfidf(self):
-        """TF-IDF 설정"""
-        texts = [self._create_enhanced_text_for_embedding(item) for item in self.enhanced_data]
-        self.tfidf_vectorizer = TfidfVectorizer(ngram_range=(1, 2), max_features=5000)
-        self.tfidf_matrix = self.tfidf_vectorizer.fit_transform(texts)
-    
-    def _setup_bm25(self):
-        """BM25 인덱스 설정"""
-        print("🔍 BM25 키워드 검색 인덱스를 생성하고 있습니다...")
-        
-        bm25_texts = []
-        for item in self.enhanced_data:
-            text_parts = [
+        # 1. Bi-encoder 임베딩 생성
+        texts = []
+        for item in self.data:
+            # 강화된 텍스트 생성
+            parts = [
                 item.get('page_name', ''),
                 item.get('Category', ''),
                 item.get('Service', ''),
                 ' '.join(item.get('hierarchy', [])),
+                ' '.join(item.get('representative_keywords', [])),
+                item.get('ai_description', '')
+            ]
+            text = ' '.join(filter(None, parts))
+            texts.append(text)
+        
+        self.embeddings = self.bi_encoder.encode(texts, show_progress_bar=True)
+        print(f"✅ {len(self.embeddings)}개 임베딩 생성 완료")
+        
+        # 2. BM25 인덱스 생성
+        bm25_texts = []
+        for item in self.data:
+            parts = [
+                item.get('page_name', ''),
+                item.get('Category', ''),
+                item.get('Service', ''),
                 ' '.join(item.get('representative_keywords', []))
             ]
-            bm25_text = ' '.join(filter(None, text_parts))
-            bm25_texts.append(bm25_text)
+            text = ' '.join(filter(None, parts))
+            bm25_texts.append(text)
         
         self.bm25 = BM25(bm25_texts)
         print("✅ BM25 인덱스 생성 완료")
     
-    def hybrid_search(self, query, top_k=7, vector_weight=0.7, keyword_weight=0.3):
-        """하이브리드 검색: 벡터 + 키워드"""
+    def hybrid_search(self, query, top_k=10, vector_weight=0.7, keyword_weight=0.3):
+        """1단계: 하이브리드 검색 (Bi-encoder + BM25)"""
+        
+        # 벡터 검색
+        query_embedding = self.bi_encoder.encode([query])
+        vector_similarities = cosine_similarity(query_embedding, self.embeddings)[0]
+        
+        # 키워드 검색
+        keyword_scores = self.bm25.get_scores(query)
+        
+        # 점수 정규화
+        max_vector = max(vector_similarities) if max(vector_similarities) > 0 else 1
+        max_keyword = max(keyword_scores) if max(keyword_scores) > 0 else 1
+        
+        # 하이브리드 점수 계산
         results = []
+        for i, (vector_sim, keyword_score) in enumerate(zip(vector_similarities, keyword_scores)):
+            normalized_vector = vector_sim / max_vector
+            normalized_keyword = keyword_score / max_keyword
+            
+            # PRIMARY 페이지 가중치
+            item = self.data[i]
+            classification_boost = 1.2 if item.get('page_classification') == 'PRIMARY' else 1.0
+            
+            hybrid_score = ((normalized_vector * vector_weight) + 
+                          (normalized_keyword * keyword_weight)) * classification_boost
+            
+            results.append({
+                'index': i,
+                'data': item,
+                'vector_score': float(vector_sim),
+                'keyword_score': float(keyword_score),
+                'hybrid_score': float(hybrid_score),
+                'classification_boost': classification_boost
+            })
         
-        if self.use_tfidf:
-            query_vector = self.tfidf_vectorizer.transform([query])
-            similarities = cosine_similarity(query_vector, self.tfidf_matrix)[0]
-            
-            for i, similarity in enumerate(similarities):
-                results.append({
-                    'index': i,
-                    'data': self.enhanced_data[i],
-                    'vector_score': float(similarity),
-                    'keyword_score': 0.0,
-                    'hybrid_score': float(similarity)
-                })
-        else:
-            query_embedding = self.model.encode([query])
-            vector_similarities = cosine_similarity(query_embedding, self.embeddings['enhanced'])[0]
-            keyword_scores = self.bm25.get_scores(query)
-            
-            max_vector_score = max(vector_similarities) if max(vector_similarities) > 0 else 1
-            max_keyword_score = max(keyword_scores) if max(keyword_scores) > 0 else 1
-            
-            for i, (vector_sim, keyword_score) in enumerate(zip(vector_similarities, keyword_scores)):
-                normalized_vector = vector_sim / max_vector_score
-                normalized_keyword = keyword_score / max_keyword_score
-                
-                # PRIMARY 페이지에 가중치 부여
-                item = self.enhanced_data[i]
-                page_classification = item.get('page_classification', 'SECONDARY')
-                classification_boost = 1.2 if page_classification == 'PRIMARY' else 1.0
-                
-                hybrid_score = ((normalized_vector * vector_weight) + (normalized_keyword * keyword_weight)) * classification_boost
-                
-                results.append({
-                    'index': i,
-                    'data': self.enhanced_data[i],
-                    'vector_score': float(vector_sim),
-                    'keyword_score': float(keyword_score),
-                    'hybrid_score': float(hybrid_score),
-                    'classification_boost': classification_boost
-                })
-        
+        # 점수순 정렬
         results.sort(key=lambda x: x['hybrid_score'], reverse=True)
         return results[:top_k]
     
-    def ai_final_selection(self, original_query, candidates):
-        """AI 최종 선택"""
-        try:
-            menu_text = ""
-            for i, result in enumerate(candidates, 1):
-                item = result['data']
-                ai_description = item.get('ai_description', '')
-                menu_text += f"""{i}. {item.get('page_name', '')}
-   카테고리: {item.get('Category', '')}
-   서비스: {item.get('Service', '')}
-   설명: {ai_description}
-   대표검색어: {', '.join(item.get('representative_keywords', []))}
-   
-"""
+    def rerank_candidates(self, query, candidates, top_k=5):
+        """2단계: Cross-encoder Rerank"""
+        if not candidates:
+            return []
+        
+        print(f"�� Cross-encoder Rerank: {len(candidates)}개 후보 재순위화")
+        
+        # 쿼리-문서 쌍 생성
+        query_doc_pairs = []
+        for candidate in candidates:
+            item = candidate['data']
+            # 간결한 문서 텍스트 생성
+            doc_text = f"{item.get('page_name', '')} {item.get('ai_description', '')}"
+            query_doc_pairs.append([query, doc_text])
+        
+        # Cross-encoder 점수 계산
+        rerank_scores = self.cross_encoder.predict(query_doc_pairs)
+        
+        # 점수 정규화 및 결합
+        min_rerank = min(rerank_scores)
+        max_rerank = max(rerank_scores)
+        score_range = max_rerank - min_rerank if max_rerank > min_rerank else 1
+        
+        for i, candidate in enumerate(candidates):
+            raw_rerank = float(rerank_scores[i])
+            normalized_rerank = (raw_rerank - min_rerank) / score_range
+            hybrid_score = candidate['hybrid_score']
             
-            response = self.client.chat.completions.create(
-                model="gpt-4o",
-                messages=[
-                    {"role": "system", "content": """당신은 사용자의 의도를 정확히 파악해 가장 적합한 메뉴를 선택하는 전문가입니다. 
-사용자의 원래 질문과 각 메뉴의 상세 정보를 종합적으로 고려하여, 가장 관련성이 높고 사용자가 원하는 기능을 제공할 수 있는 메뉴 하나의 번호만 답하세요. 
-반드시 숫자만 답하세요."""},
-                    {"role": "user", "content": f"""사용자 질문: '{original_query}'
-
-메뉴 후보들:
-{menu_text}
-
-가장 적합한 메뉴의 번호를 선택하세요:"""}
-                ],
-                max_tokens=10,
-                temperature=0.1
-            )
+            # 최종 점수: Rerank 70% + Hybrid 30%
+            final_score = (normalized_rerank * 0.7) + (hybrid_score * 0.3)
             
-            selected_num = int(response.choices[0].message.content.strip())
-            if 1 <= selected_num <= len(candidates):
-                selected_menu = candidates[selected_num - 1]
-                print(f"🎯 AI 최종 선택: {selected_num}번 - {selected_menu['data'].get('page_name', '')}")
-                return selected_menu
-            else:
-                return candidates[0]
-                
-        except Exception as e:
-            print(f"❌ AI 메뉴 선택 실패: {e}")
-            return candidates[0]
+            candidate['rerank_score'] = raw_rerank
+            candidate['final_score'] = final_score
+        
+        # 최종 점수로 재정렬
+        reranked = sorted(candidates, key=lambda x: x['final_score'], reverse=True)
+        
+        print(f"   상위 {min(top_k, len(reranked))}개 결과:")
+        for i, result in enumerate(reranked[:top_k], 1):
+            item = result['data']
+            print(f"   {i}. {item.get('page_name', '')} (최종: {result['final_score']:.3f})")
+        
+        return reranked[:top_k]
     
-    def _optimize_query_with_ai(self, query):
-        """AI를 활용한 검색어 최적화 (단일어 -> 복합어 변환)"""
-        try:
-            response = self.client.chat.completions.create(
-                model="gpt-4o",
-                messages=[
-                    {"role": "system", "content": """당신은 한국어 검색어 최적화 전문가입니다. 
-사용자가 입력한 자연어 검색어에서 의미있는 단일어들을 찾아 복합어로 변환해주세요.
-
-예시:
-- '카드 이용 내역 알려줘' → '카드이용내역 알려줘'
-- '페이북 머니 충전하고 싶어' → '페이북머니 충전하고 싶어'  
-- '신용 카드 신청' → '신용카드 신청'
-- '포인트 적립 내역' → '포인트적립내역'
-- '대출 이자 계산기' → '대출이자계산기'
-
-규칙:
-1. 띄어쓰기로 분리된 단일어들 중 하나의 개념을 나타내는 것들을 합쳐주세요
-2. 조사, 어미, 부사는 그대로 유지하세요
-3. 원래 의미를 해치지 않는 선에서만 변환하세요
-4. 변환된 검색어만 답하세요 (설명 없이)"""},
-                    {"role": "user", "content": f"다음 검색어를 최적화해주세요: {query}"}
-                ],
-                max_tokens=100,
-                temperature=0.1
-            )
-            
-            optimized_query = response.choices[0].message.content.strip()
-            
-            # 변환이 있었는지 확인
-            if optimized_query != query and optimized_query:
-                print(f"🔧 검색어 최적화: '{query}' → '{optimized_query}'")
-                return optimized_query
-            else:
-                return query
-                
-        except Exception as e:
-            print(f"⚠️ 검색어 최적화 실패: {e}")
-            return query
-
-    def _merge_search_results(self, original_results, optimized_results, max_results=7):
-        """원본과 최적화된 검색 결과를 병합"""
-        # 중복 제거를 위한 딕셔너리 (page_name 기준)
-        merged = {}
-        
-        # 원본 검색 결과를 우선 추가 (더 높은 가중치)
-        for result in original_results:
-            page_name = result['data'].get('page_name', '')
-            if page_name not in merged:
-                # 원본 검색에서 나온 결과는 점수에 1.1배 가중치
-                boosted_result = result.copy()
-                boosted_result['hybrid_score'] *= 1.1
-                boosted_result['source'] = 'original'
-                merged[page_name] = boosted_result
-        
-        # 최적화된 검색 결과 추가 (중복되지 않는 것만)
-        for result in optimized_results:
-            page_name = result['data'].get('page_name', '')
-            if page_name not in merged:
-                result_copy = result.copy()
-                result_copy['source'] = 'optimized'
-                merged[page_name] = result_copy
-        
-        # 점수 순으로 정렬하여 상위 max_results개 반환
-        final_results = sorted(merged.values(), key=lambda x: x['hybrid_score'], reverse=True)
-        return final_results[:max_results]
-
     def search(self, query):
-        """이중 검색: 원본 + 최적화된 검색어 병합"""
+        """통합 검색 실행"""
         print(f"\n{'='*60}")
-        print(f"🚀 통합 AI 검색 시작: '{query}'")
+        print(f"🔍 검색 쿼리: '{query}'")
         print(f"{'='*60}")
         
-        # 0단계: 검색어 최적화
-        optimized_query = self._optimize_query_with_ai(query)
+        # 1단계: 하이브리드 검색
+        print("\n🔍 1단계: 하이브리드 검색 (Bi-encoder + BM25)")
+        candidates = self.hybrid_search(query, top_k=10)
         
-        # 1단계: 이중 하이브리드 검색
-        print(f"\n🔍 1단계: 이중 하이브리드 검색 (원본 + 최적화)")
-        
-        # 원본 검색어로 검색
-        print(f"   📝 원본 검색어: '{query}'")
-        original_candidates = self.hybrid_search(query, top_k=5)
-        
-        # 최적화된 검색어로 검색 (다를 경우에만)
-        optimized_candidates = []
-        if optimized_query != query:
-            print(f"   🔧 최적화 검색어: '{optimized_query}'")
-            optimized_candidates = self.hybrid_search(optimized_query, top_k=5)
-        
-        # 결과 병합
-        all_candidates = self._merge_search_results(original_candidates, optimized_candidates, max_results=7)
-        
-        if not all_candidates:
+        if not candidates:
             print("❌ 검색 결과가 없습니다.")
             return None
         
-        print(f"   찾은 후보 {len(all_candidates)}개:")
-        for i, result in enumerate(all_candidates, 1):
+        print(f"   후보 {len(candidates)}개 발견")
+        for i, result in enumerate(candidates[:5], 1):  # 상위 5개만 출력
             item = result['data']
-            page_name = item.get('page_name', '')
-            vector_score = result['vector_score']
-            keyword_score = result['keyword_score']
-            hybrid_score = result['hybrid_score']
-            source = result.get('source', 'merged')
-            source_icon = '📝' if source == 'original' else '🔧' if source == 'optimized' else '🔀'
-            
-            print(f"   {i}. {page_name} {source_icon}")
-            print(f"      벡터: {vector_score:.3f} | 키워드: {keyword_score:.3f} | 통합: {hybrid_score:.3f}")
+            print(f"   {i}. {item.get('page_name', '')} (하이브리드: {result['hybrid_score']:.3f})")
         
-        # 2단계: AI 최종 선택 (원래 질의 사용)
-        print(f"\n🎯 2단계: AI 최종 선택")
-        final_result = self.ai_final_selection(query, all_candidates)
+        # 2단계: Cross-encoder Rerank
+        print(f"\n🎯 2단계: Cross-encoder Rerank")
+        final_results = self.rerank_candidates(query, candidates, top_k=5)
         
-        return final_result
+        return final_results[0] if final_results else None
     
     def print_result(self, query, result):
         """검색 결과 출력"""
@@ -696,7 +301,7 @@ class UnifiedMenuSearcher:
         
         item = result['data']
         print(f"\n{'='*60}")
-        print(f"🏆 최종 추천 메뉴")
+        print(f"🏆 최종 검색 결과")
         print(f"{'='*60}")
         print(f"📍 페이지명: {item.get('page_name', '')}")
         print(f"📂 카테고리: {item.get('Category', '')}")
@@ -705,68 +310,50 @@ class UnifiedMenuSearcher:
         if item.get('hierarchy'):
             print(f"📋 계층구조: {' > '.join(item.get('hierarchy', []))}")
         
-        print(f"📊 하이브리드 점수: {result.get('hybrid_score', 0):.4f}")
-        print(f"   ┣ 벡터 점수: {result.get('vector_score', 0):.4f}")
-        print(f"   ┣ 키워드 점수: {result.get('keyword_score', 0):.4f}")
-        classification_boost = result.get('classification_boost', 1.0)
-        if classification_boost > 1.0:
-            print(f"   ┗ PRIMARY 가중치: x{classification_boost}")
+        # 점수 정보
+        print(f"📊 최종 점수: {result.get('final_score', 0):.4f}")
+        print(f"   ┣ Rerank 점수: {result.get('rerank_score', 0):.4f}")
+        print(f"   ┗ 하이브리드 점수: {result.get('hybrid_score', 0):.4f}")
         
-        ai_description = item.get('ai_description', '')
-        if ai_description:
-            print(f"🤖 AI 설명: {ai_description}")
+        if result.get('classification_boost', 1.0) > 1.0:
+            print(f"   ⭐ PRIMARY 가중치 적용")
         
-        representative_keywords = item.get('representative_keywords', [])
-        if representative_keywords:
-            print(f"🔍 대표 검색어: {', '.join(representative_keywords)}")
+        if item.get('ai_description'):
+            print(f"📝 설명: {item.get('ai_description', '')}")
         
-        page_classification = item.get('page_classification', '')
-        if page_classification:
-            print(f"📈 페이지 분류: {page_classification}")
+        if item.get('representative_keywords'):
+            print(f"🔍 관련 키워드: {', '.join(item.get('representative_keywords', []))}")
         
         print(f"{'='*60}")
     
     def get_statistics(self):
-        """시스템 통계 정보"""
+        """시스템 통계"""
         print(f"\n{'='*60}")
         print(f"📊 시스템 통계")
         print(f"{'='*60}")
-        print(f"📄 원본 데이터: {len(self.original_data)}개 항목")
-        print(f"✨ 필터링된 데이터: {len(self.filtered_data)}개 항목")
-        print(f"🚀 강화된 데이터: {len(self.enhanced_data)}개 항목")
-        print(f"🧠 사용 모델: {self.current_model_name}")
+        print(f"📄 총 데이터: {len(self.data)}개 항목")
+        print(f"🧠 Bi-encoder: multilingual-e5-small")
+        print(f"🎯 Cross-encoder: ms-marco-MiniLM-L-12-v2")
         
-        # 분류 통계  
-        primary_count = sum(1 for item in self.enhanced_data if item.get('page_classification') == 'PRIMARY')
-        secondary_count = sum(1 for item in self.enhanced_data if item.get('page_classification') == 'SECONDARY')
+        # 분류 통계
+        primary_count = sum(1 for item in self.data if item.get('page_classification') == 'PRIMARY')
+        secondary_count = sum(1 for item in self.data if item.get('page_classification') == 'SECONDARY')
         
-        print(f"🎯 PRIMARY 페이지: {primary_count}개 (검색 가중치 x1.2)")
+        print(f"🎯 PRIMARY 페이지: {primary_count}개 (가중치 x1.2)")
         print(f"📋 SECONDARY 페이지: {secondary_count}개")
-        print(f"📈 1차 필터링: {((len(self.original_data) - len(self.filtered_data)) / len(self.original_data) * 100):.1f}% 제거 (규칙 기반)")
-        ai_filter_percent = (self.excluded_ai_count / self.original_enhanced_count * 100) if self.original_enhanced_count > 0 else 0
-        print(f"📈 2차 필터링: {ai_filter_percent:.1f}% 제거 (AI 4단계 분류 후 ERROR/INFO 제외)")
+        print(f"⚖️ 하이브리드 가중치: 벡터 70% + 키워드 30%")
+        print(f"🔄 Rerank 가중치: Rerank 70% + 하이브리드 30%")
         print(f"{'='*60}")
 
 
 def main():
     """메인 함수"""
-    print("🚀 AI 메뉴 검색 시스템")
-    print("자동 필터링 + 데이터 강화 + 하이브리드 검색")
-    
-    # API 키 확인
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        api_key = input("OpenAI API 키를 입력하세요: ").strip()
-        if not api_key:
-            print("❌ API 키가 필요합니다.")
-            return
-    
     try:
-        # 시스템 초기화
-        searcher = UnifiedMenuSearcher(api_key)
+        # 검색 엔진 초기화
+        engine = PureSearchEngine()
         
-        # 통계 정보 출력
-        searcher.get_statistics()
+        # 통계 출력
+        engine.get_statistics()
         
         print("\n자연어로 검색어를 입력하세요 ('q' 입력시 종료, 'stats' 입력시 통계 조회):")
         
@@ -779,7 +366,7 @@ def main():
                     break
                 
                 if query.lower() == 'stats':
-                    searcher.get_statistics()
+                    engine.get_statistics()
                     continue
                 
                 if not query:
@@ -787,8 +374,12 @@ def main():
                     continue
                 
                 # 검색 수행
-                result = searcher.search(query)
-                searcher.print_result(query, result)
+                start_time = time.time()
+                result = engine.search(query)
+                search_time = time.time() - start_time
+                
+                engine.print_result(query, result)
+                print(f"⏱️ 검색 시간: {search_time:.2f}초")
                 
             except KeyboardInterrupt:
                 print("\n프로그램을 종료합니다.")
@@ -798,9 +389,8 @@ def main():
     
     except Exception as e:
         print(f"❌ 초기화 중 오류가 발생했습니다: {e}")
-        import traceback
-        traceback.print_exc()
+        exit(1)
 
 
 if __name__ == "__main__":
-    main() 
+    main()

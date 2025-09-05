@@ -1,0 +1,17 @@
+[project]
+name = "pure-ai-search"
+version = "3.0.0"
+description = "순수 AI 검색 엔진 - LLM 의존성 없는 2단계 앙상블 검색 시스템"
+readme = "README.md"
+requires-python = ">=3.8"
+dependencies = [
+    "numpy>=1.24.0",
+    "scikit-learn>=1.3.0",
+    "scipy>=1.10.0",
+    "sentence-transformers>=2.7.0",
+    "torch>=2.0.0",
+    "rank-bm25>=0.2.0",
+]
+
+[tool.uv]
+dev-dependencies = []

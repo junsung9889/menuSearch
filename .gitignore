@@ -1,15 +1,4 @@
-# 모델 파일들 (용량이 크므로 제외)
-models/
-manual_model/
-local_model/
-paraphrase-multilingual-MiniLM-L12-v2/
-*.bin
-*.safetensors
-*.model
-*.pth
-*.pt
-
-# Python 관련
+# Python
 __pycache__/
 *.py[cod]
 *$py.class
@@ -27,34 +16,97 @@ parts/
 sdist/
 var/
 wheels/
+share/python-wheels/
 *.egg-info/
 .installed.cfg
 *.egg
 MANIFEST
 
-# 가상환경
-venv/
+# Virtual environments
+.env
+.venv
 env/
+venv/
 ENV/
+env.bak/
+venv.bak/
 
-# IDE 설정
+# uv
+.uv/
+uv.lock
+
+# IDE
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
 
-# macOS
-.DS_Store
-.AppleDouble
-.LSOverride
+# Jupyter Notebook
+.ipynb_checkpoints
 
-# 임시 파일들
+# pyenv
+.python-version
+
+# pipenv
+Pipfile.lock
+
+# poetry
+poetry.lock
+
+# Celery
+celerybeat-schedule
+celerybeat.pid
+
+# SageMath parsed files
+*.sage.py
+
+# Environments
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Pyre type checker
+.pyre/
+
+# pytype static type analyzer
+.pytype/
+
+# Cython debug symbols
+cython_debug/
+
+# PyCharm
+.idea/
+
+# Project specific
+*.log
 *.tmp
-*.temp
-model_path.txt
-downloaded_model_path.txt
-simple_model_path.txt
+*_backup.py
+*_old.py
+temp/
+tmp/
 
-# 로그 파일
-*.log 
+# AI Models (too large for git)
+models/*/pytorch_model.bin
+models/*/model.safetensors
+models/*/*.bin
+models/*/*.safetensors
+
+# Data files (optional - uncomment if data is too large)
+# *.json
+
+# System files
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.bak
+*.backup
+*~
